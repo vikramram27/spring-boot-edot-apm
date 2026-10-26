@@ -1,0 +1,8 @@
+.git
+.gitignore
+.agents
+target/
+*.log
+.idea
+*.iml
+.vscode
