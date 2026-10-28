@@ -24,8 +24,11 @@ RUN apk add --no-cache curl
 # Copy fat jar from build stage
 COPY --from=build /app/target/*.jar app.jar
 
+# Download Elastic Distribution of OpenTelemetry (EDOT) Java Agent v1.14.0
+ADD https://repo1.maven.org/maven2/co/elastic/otel/elastic-otel-javaagent/1.14.0/elastic-otel-javaagent-1.14.0.jar /app/elastic-otel-javaagent.jar
+
 # Configure execution environment
 ENV SERVER_PORT=8080
 EXPOSE 8080
 
-ENTRYPOINT ["java", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
+ENTRYPOINT ["java", "-javaagent:/app/elastic-otel-javaagent.jar", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
