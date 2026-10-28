@@ -1,456 +1,271 @@
-# Payment Gateway REST API
+# Spring Boot + Elastic Distribution of OpenTelemetry (EDOT) APM
 
-A modern, high-performance Payment Gateway REST API built with **Spring Boot 3.4**, **Java 21 LTS**, **PostgreSQL 16**, **Redis 7**, and **Spring Security 6**.
+A production-ready reference architecture demonstrating how to instrument a modern **Spring Boot 3.4 (Java 21 LTS)** application using the **Elastic Distribution of OpenTelemetry (EDOT) Java Agent v1.14.0**, shipping distributed traces, metrics, and logs to **Elastic APM & Elasticsearch (ECK)**.
 
-Designed with fintech best practices in mind, this service delivers atomic balance transactions, guaranteed payment idempotency, instant token revocation, and a comprehensive transaction audit ledger.
-
----
-
-## Key Features
-
-- **Stateless JWT Authentication:** Secure HMAC-SHA256 token authorization with Spring Security 6.
-- **Instant Token Revocation:** Redis-backed blacklist invalidates tokens immediately on logout.
-- **Deposit & Top-Up Operations:** Instant balance funding supporting multiple methods (`BANK_TRANSFER`, `CREDIT_CARD`, `EWALLET`).
-- **Payment Processing:** Order charge execution with real-time balance validation and overdraft prevention.
-- **Guaranteed Idempotency:** Header-based `Idempotency-Key` cached in Redis (24h TTL) eliminates duplicate debits and credits from network retries.
-- **Concurrency & ACID Integrity:** Optimistic locking (`@Version`) prevents race conditions and balance discrepancies under heavy traffic.
-- **Audit Ledger & Refunds:** Immutable transaction history tracking all top-ups, charges, and refunds with unique reference tracking (`TOP-...`, `PAY-...`, `REF-...`).
-- **Standardized Error Handling:** RFC-7807-compliant JSON error responses with detailed validation breakdowns.
-- **Turnkey Containerization:** Multi-stage Docker build orchestrated via Docker Compose with automated health checks.
+This repository focuses on **enterprise APM integration, observability workflows, and failure alerting**, using a containerized multi-tier application (PostgreSQL + Redis + Spring Security) as a realistic workload generator.
 
 ---
 
-## Architecture
+## Observability Architecture
 
+```mermaid
+flowchart TD
+    subgraph UI ["Elastic Observability UI"]
+        Kibana["Kibana Dashboards<br/>- Traces & Service Maps<br/>- JVM & CPU Metrics<br/>- Alerts & Cases"]
+    end
+
+    subgraph Cluster ["ECK / Kubernetes Cluster"]
+        ES[("Elasticsearch")]
+        APM["Elastic APM Server (:8200)<br/>OTLP/HTTP Receiver"]
+        APM -->|Ingest Telemetry| ES
+        ES -->|Visualize| Kibana
+    end
+
+    subgraph Docker ["Spring Boot Application Container (:8088)"]
+        subgraph JVM ["Java 21 Virtual Machine"]
+            Agent["EDOT Java Agent (v1.14.0)<br/>- Bytecode Instrumentation<br/>- Inferred Spans (async-profiler)"]
+            
+            subgraph Framework ["Spring Boot 3.4 Workload"]
+                Web["Spring MVC / Tomcat (:8080)"]
+                JPA["Spring Data JPA / Hibernate"]
+                RedisClient["Spring Data Redis / Lettuce"]
+            end
+            
+            Agent -.->|Auto-Instruments| Web
+            Agent -.->|Auto-Instruments| JPA
+            Agent -.->|Auto-Instruments| RedisClient
+        end
+    end
+
+    subgraph Infrastructure ["Data Infrastructure"]
+        PG[("PostgreSQL 16 (:5432)")]
+        RD[("Redis 7 (:6380)")]
+    end
+
+    Client["Client / curl Traffic (:8088)"] -->|HTTP Requests| Web
+    JPA -->|JDBC Queries| PG
+    RedisClient -->|Cache & Idempotency| RD
+
+    Agent ==>|OTLP over HTTP :8200 Protobuf| APM
 ```
-                    +-----------------------------+
-                    |   Client / API Consumer     |
-                    +--------------+--------------+
-                                   |
-                              HTTP :8088
-                                   v
-                    +-----------------------------+
-                    |    Payment Gateway App      |
-                    | (Spring Boot 3.4 / Java 21) |
-                    +-------+-------------+-------+
-                            |             |
-                       JDBC |             | Redis RESP
-                      :5432 |             | :6379
-                            v             v
-           +--------------------+     +--------------------+
-           |   PostgreSQL 16    |     |   Redis 7 Alpine   |
-           |  (ACID Relational) |     | (Idempotency Cache |
-           |                    |     | & Token Blacklist) |
-           +--------------------+     +--------------------+
+
+---
+
+## Key Observability Highlights
+
+- **Zero-Code Java Instrumentation:** 100% bytecode auto-instrumentation via `-javaagent:/app/elastic-otel-javaagent.jar`. No proprietary APM SDK code in application classes.
+- **Full Distributed Tracing:** Automatically tracks end-to-end spans across incoming HTTP endpoints, Spring Data JPA / Hibernate SQL queries, and Redis Lettuce commands.
+- **Deep CPU Profiling (Inferred Spans):** Native `async-profiler` integration automatically samples CPU call stacks on slow traces without manual instrumentation.
+- **Environment Separation:** Segment metrics and traces in Kibana using `deployment.environment=development|staging|production`.
+- **ECK (Elastic Cloud on Kubernetes) Compatibility:** Direct OTLP integration with self-managed ECK APM Server over plain HTTP or TLS.
+- **Failure Alerting & Incident Cases:** Real-world playbook for capturing database connection timeouts (`HikariPool`) and auto-triggering alerts in Kibana.
+
+---
+
+## Quick Setup
+
+Get the entire stack (Spring Boot App + PostgreSQL + Redis + EDOT APM Agent) running in minutes:
+
+### 1. Configure Environment
+Create your local `.env` configuration file from the template:
+```bash
+cp .env.example .env
 ```
 
----
+### 2. Set APM Server Details in `.env`
+Update the Elastic APM Server endpoint and credentials in `.env`:
+```env
+# Enable APM exporter
+OTEL_SDK_DISABLED=false
 
-## Services & Port Mapping
+# APM Server URL (HTTP port 8200)
+OTEL_EXPORTER_OTLP_ENDPOINT=http://<YOUR_APM_SERVER_IP>:8200
 
-| Service | Container Port | Host Port | Purpose |
-|---|---|---|---|
-| `app` | `8080` | **`8088`** | Payment Gateway REST API & Health Actuator |
-| `postgres` | `5432` | **`5432`** | Relational database (users, balances, ledger) |
-| `redis` | `6379` | **`6380`** | Idempotency key storage & token revocation blacklist |
+# APM Secret Token
+OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer <YOUR_APM_TOKEN>'
+```
+*(Tip: Set `OTEL_SDK_DISABLED=true` if developing offline without an APM Server).*
 
-> **Note:** Host ports `8088` and `6380` prevent port collisions with other local containers.
-
----
-
-## Getting Started
-
-### Prerequisites
-- [Docker](https://docs.docker.com/get-docker/) & [Docker Compose v2](https://docs.docker.com/compose/)
-- `curl` (for manual testing and verification)
-
-### 1. Start the Cluster
+### 3. Build & Start the Containers
 ```bash
 docker compose up -d --build
 ```
 
-### 2. Verify Service Health
-```bash
-curl -s http://localhost:8088/actuator/health | jq .
-```
-Expected output:
-```json
-{
-  "status": "UP",
-  "components": {
-    "db": { "status": "UP" },
-    "redis": { "status": "UP" },
-    "diskSpace": { "status": "UP" }
-  }
-}
-```
-
-### 3. Run Automated End-to-End Verification
+### 4. Verify & Generate APM Telemetry
+Run the automated verification suite to execute 13 transactions and verify system health:
 ```bash
 ./verify-api.sh
 ```
-This script executes a 13-stage test suite validating the entire lifecycle: registration, authentication, deposits, idempotency deduplication, payments, insufficient balance rejection, refunds, transaction queries, and token logout revocation.
+
+### 5. View in Kibana
+Navigate to **Kibana** (`https://<KIBANA_HOST>:5601`) ➔ **Observability** ➔ **APM** ➔ **Services** ➔ **`payment-gateway-api`** to view your real-time traces, service maps, and JVM metrics.
 
 ---
 
-## Configuration & Environment Variables
+## EDOT Agent Implementation Details
 
-Environment variables can be configured directly or via `.env`:
+### 1. Multi-Stage Container Setup ([`Dockerfile`](file:///home/vikram/github/spring-boot-edot-apm/Dockerfile))
 
-| Variable | Default | Description |
+The agent is downloaded directly from Maven Central during Docker image build and attached to the JVM startup:
+
+```dockerfile
+# Stage 2: Runtime image
+FROM eclipse-temurin:21-jre-alpine
+WORKDIR /app
+
+# Download official Elastic Distribution of OpenTelemetry (EDOT) Java Agent v1.14.0
+ADD https://repo1.maven.org/maven2/co/elastic/otel/elastic-otel-javaagent/1.14.0/elastic-otel-javaagent-1.14.0.jar /app/elastic-otel-javaagent.jar
+
+COPY --from=build /app/target/*.jar app.jar
+
+# Attach agent via JVM flag
+ENTRYPOINT ["java", "-javaagent:/app/elastic-otel-javaagent.jar", "-XX:+UseContainerSupport", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
+```
+
+---
+
+### 2. APM Environment Configuration ([`.env`](file:///home/vikram/github/spring-boot-edot-apm/.env))
+
+All agent settings are configured dynamically via environment variables without hardcoding:
+
+```env
+# ==========================================
+# Elastic OpenTelemetry (EDOT) APM Configuration
+# ==========================================
+# Toggle APM telemetry on/off (set 'true' for offline local dev)
+OTEL_SDK_DISABLED=false
+
+# Service identifier shown in Kibana APM
+OTEL_SERVICE_NAME=payment-gateway-api
+
+# Environment tagging (drives the environment dropdown in Kibana)
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=development,service.version=1.0.0
+
+# OTLP endpoint of Elastic APM Server
+OTEL_EXPORTER_OTLP_ENDPOINT=http://10.73.129.202:8200
+
+# Bearer Token Authentication (must be HeaderName=HeaderValue)
+OTEL_EXPORTER_OTLP_HEADERS='Authorization=Bearer <YOUR_APM_SECRET_TOKEN>'
+
+# Exporters
+OTEL_METRICS_EXPORTER=otlp
+OTEL_LOGS_EXPORTER=otlp
+
+# Enable deep CPU profiling on traces via async-profiler
+OTEL_INFERRED_SPANS_ENABLED=true
+```
+
+---
+
+## ECK (Elastic Cloud on Kubernetes) Integration Guide
+
+To avoid managing self-signed TLS certificates and hostname verification mismatches on internal networks, configure the `ApmServer` custom resource in Kubernetes to receive plain HTTP traffic:
+
+```yaml
+# In apm-server.yaml
+spec:
+  http:
+    tls:
+      selfSignedCertificate:
+        disabled: true
+```
+
+Then configure your application `.env`:
+```env
+OTEL_EXPORTER_OTLP_ENDPOINT=http://<APM_LOADBALANCER_OR_NODE_IP>:8200
+```
+
+---
+
+## Environment Separation (Dev vs. Production)
+
+Manage different target environments cleanly using OpenTelemetry tags and Spring profiles:
+
+| Configuration | Development | Production |
 |---|---|---|
-| `SERVER_PORT` | `8080` | Internal application port |
-| `DB_HOST` | `postgres` | PostgreSQL hostname |
-| `DB_PORT` | `5432` | PostgreSQL port |
-| `DB_NAME` | `edot_apm` | Database schema name |
-| `DB_USER` | `postgres` | PostgreSQL username |
-| `DB_PASSWORD` | `postgres` | PostgreSQL password |
-| `REDIS_HOST` | `redis` | Redis hostname |
-| `REDIS_PORT` | `6379` | Redis port |
-| `JWT_SECRET` | *(256-bit hex)* | HMAC-SHA256 signing secret |
-| `JWT_EXPIRATION_MS` | `86400000` | Token validity duration (24 hours) |
+| `APP_ENV` | `development` | `production` |
+| `SPRING_PROFILES_ACTIVE` | `dev` | `prod` |
+| `OTEL_SDK_DISABLED` | `false` (or `true` if no collector) | `false` |
+| `OTEL_RESOURCE_ATTRIBUTES` | `deployment.environment=development` | `deployment.environment=production` |
+
+In Kibana, switch between environments using the **Environment** dropdown at the top of every APM dashboard.
 
 ---
 
-## API Reference
+## Observability & Failure Simulation Playbook
 
-All requests and responses use `Content-Type: application/json`.  
-Protected endpoints require the standard header: `Authorization: Bearer <JWT_TOKEN>`.
+### 1. Generating Baseline APM Traffic
+Execute the end-to-end verification script to create realistic transactions (authentication, user profile, account deposits, payments, refunds):
+```bash
+./verify-api.sh
+```
+In Kibana (`Observability ➔ APM ➔ Services ➔ payment-gateway-api`), you will immediately see:
+- Service throughput & response time percentiles (p50, p95, p99).
+- Complete waterfall traces showing the HTTP request breaking down into JPA SQL queries and Redis operations.
+- JVM runtime telemetry (Heap memory, non-heap, GC pause times, active thread count).
 
-### Common Response Wrapper
-Successful responses are encapsulated in a standard envelope:
-```json
-{
-  "success": true,
-  "message": "Operation description",
-  "data": { ... },
-  "timestamp": "2026-10-26T10:00:00Z"
-}
+---
+
+### 2. Testing Database Failure & Alert Rules
+
+Simulate a production database outage and test incident alerting:
+
+#### Step 1: Create the Alert Rule in Kibana
+1. Navigate to **Observability ➔ Alerts ➔ Manage Rules ➔ Create rule**.
+2. Select **KQL or Lucene** rule type.
+3. Select your APM Data view (`traces-apm*`).
+4. Set KQL Query:
+   ```kql
+   service.name: "payment-gateway-api" AND (error.exception.type: "*Timeout*" OR error.exception.message: "*HikariPool*" OR error.exception.message: "*Connection refused*")
+   ```
+5. Set condition: **`WHEN count() IS ABOVE 0 FOR THE LAST 1 minute`**.
+6. Set Role visibility to **`Logs`** and click **Save**.
+
+#### Step 2: Stop PostgreSQL
+```bash
+docker compose stop postgres
 ```
 
----
-
-### 1. Authentication (`/api/v1/auth`)
-
-#### Register a New Account
-Creates a new customer profile and initializes an active payment balance.
-- **Method:** `POST`
-- **Path:** `/api/v1/auth/register`
-- **Auth:** Public
-
-**Request:**
+#### Step 3: Trigger Traffic
 ```bash
-curl -X POST http://localhost:8088/api/v1/auth/register \
+curl -i -X POST http://localhost:8088/api/v1/auth/login \
   -H "Content-Type: application/json" \
-  -d '{
-    "name": "Alex Morgan",
-    "email": "alex.morgan@example.com",
-    "password": "SecurePassword123!"
-  }'
+  -d '{"email":"test@example.com","password":"password123"}'
 ```
 
-**Response (`201 Created`):**
-```json
-{
-  "success": true,
-  "message": "User registered successfully",
-  "data": {
-    "accessToken": "eyJhbGciOiJIUzI1NiJ9...",
-    "tokenType": "Bearer",
-    "expiresIn": 86400,
-    "user": {
-      "id": "18b1a1c7-4736-441b-b709-274c9c5a91c6",
-      "name": "Alex Morgan",
-      "email": "alex.morgan@example.com",
-      "role": "ROLE_USER",
-      "createdAt": "2026-10-26T10:00:00Z"
-    }
-  }
-}
-```
+#### Step 4: Observe Alert & APM Traces
+- **APM Error Log:** EDOT agent automatically captures `CannotGetJdbcConnectionException: HikariPool - Connection is not available, request timed out` with complete stack traces.
+- **Kibana Alerts:** The rule triggers into **Fired** state within 60 seconds.
+- **Elastic Cases:** Convert the active alert into an incident investigation ticket under **Observability ➔ Cases**.
 
----
-
-#### User Login
-Authenticates credentials and returns a JWT access token.
-- **Method:** `POST`
-- **Path:** `/api/v1/auth/login`
-- **Auth:** Public
-
-**Request:**
+#### Step 5: Recover
 ```bash
-curl -X POST http://localhost:8088/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "alex.morgan@example.com",
-    "password": "SecurePassword123!"
-  }'
+docker compose start postgres
 ```
+The application reconnects to PostgreSQL via HikariCP self-healing, and the alert automatically resolves.
 
 ---
 
-#### User Logout
-Immediately revokes the JWT token by adding it to the Redis blacklist for its remaining lifespan.
-- **Method:** `POST`
-- **Path:** `/api/v1/auth/logout`
-- **Auth:** Bearer Token
+## Workload Application Quick Reference
 
-**Request:**
+The bundled workload is a sample Spring Boot application designed to exercise diverse telemetry signals:
+
+| Component | Technology | Instrumented Signals |
+|---|---|---|
+| Web Layer | Spring MVC + Embedded Tomcat | Inbound HTTP spans, status codes, routes |
+| Security | Spring Security 6 + JJWT | Filter chain latency, unauthorized 401 spans |
+| Database | Spring Data JPA + PostgreSQL 16 | JDBC queries, transaction durations, connection pool |
+| Cache | Spring Data Redis 7 (Lettuce) | Redis commands, cache hits/misses, idempotency |
+| Runtime | Eclipse Temurin JDK 21 Alpine | Heap memory, thread states, CPU profiling |
+
+### Starting the Cluster
 ```bash
-curl -X POST http://localhost:8088/api/v1/auth/logout \
-  -H "Authorization: Bearer <TOKEN>"
+# Copy example configuration
+cp .env.example .env
+
+# Start app, postgres, and redis
+docker compose up -d --build
+
+# Run verification suite
+./verify-api.sh
 ```
-
----
-
-### 2. User Management (`/api/v1/users`)
-
-#### Get Current Profile
-- **Method:** `GET`
-- **Path:** `/api/v1/users/me`
-- **Auth:** Bearer Token
-
-```bash
-curl -X GET http://localhost:8088/api/v1/users/me \
-  -H "Authorization: Bearer <TOKEN>"
-```
-
-#### Update Profile
-- **Method:** `PUT`
-- **Path:** `/api/v1/users/me`
-- **Auth:** Bearer Token
-
-```bash
-curl -X PUT http://localhost:8088/api/v1/users/me \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Alex Morgan Updated"}'
-```
-
----
-
-### 3. Balance & Payment Operations (`/api/v1/pocket`)
-
-#### Get Account Balance
-Retrieves current available funds and currency.
-- **Method:** `GET`
-- **Path:** `/api/v1/pocket`
-- **Auth:** Bearer Token
-
-**Request:**
-```bash
-curl -X GET http://localhost:8088/api/v1/pocket \
-  -H "Authorization: Bearer <TOKEN>"
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "success": true,
-  "message": "Pocket retrieved successfully",
-  "data": {
-    "pocketId": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
-    "userId": "18b1a1c7-4736-441b-b709-274c9c5a91c6",
-    "balance": 150.00,
-    "currency": "USD",
-    "updatedAt": "2026-10-26T10:10:00Z"
-  }
-}
-```
-
----
-
-#### Top-Up / Deposit Funds
-Credit funds to the account. Supports optional `Idempotency-Key` header to safely retry requests without risk of duplicate deposits.
-- **Method:** `POST`
-- **Path:** `/api/v1/pocket/top-up`
-- **Auth:** Bearer Token
-- **Headers:** `Idempotency-Key: <unique-string>` (Recommended)
-
-**Request:**
-```bash
-curl -X POST http://localhost:8088/api/v1/pocket/top-up \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: topup-req-20261026-001" \
-  -d '{
-    "amount": 250.00,
-    "paymentMethod": "BANK_TRANSFER",
-    "description": "Wire transfer deposit"
-  }'
-```
-
-**Response (`201 Created`):**
-```json
-{
-  "success": true,
-  "message": "Pocket top-up completed successfully",
-  "data": {
-    "id": "dff17ea8-30a3-4cab-8e26-bc60ab77041f",
-    "referenceId": "TOP-F0FC8816C6A8",
-    "type": "TOP_UP",
-    "amount": 250.00,
-    "balanceAfter": 250.00,
-    "currency": "USD",
-    "status": "SUCCESS",
-    "paymentMethod": "BANK_TRANSFER",
-    "orderId": null,
-    "idempotencyKey": "topup-req-20261026-001",
-    "description": "Wire transfer deposit",
-    "createdAt": "2026-10-26T10:10:33Z"
-  }
-}
-```
-
----
-
-#### Process Payment Charge
-Debit funds from the account to pay for an order. Fails atomically if balance is insufficient.
-- **Method:** `POST`
-- **Path:** `/api/v1/pocket/pay`
-- **Auth:** Bearer Token
-- **Headers:** `Idempotency-Key: <unique-string>` (Recommended)
-
-**Request:**
-```bash
-curl -X POST http://localhost:8088/api/v1/pocket/pay \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: order-pay-20261026-99" \
-  -d '{
-    "amount": 45.50,
-    "orderId": "ORD-2026-9999",
-    "description": "Order payment for Merchant XYZ"
-  }'
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "success": true,
-  "message": "Payment processed successfully",
-  "data": {
-    "id": "6e6fe4ae-782f-403b-931c-0cb4091225b7",
-    "referenceId": "PAY-EBB9326071EA",
-    "type": "PAYMENT",
-    "amount": 45.50,
-    "balanceAfter": 204.50,
-    "currency": "USD",
-    "status": "SUCCESS",
-    "paymentMethod": "POCKET",
-    "orderId": "ORD-2026-9999",
-    "idempotencyKey": "order-pay-20261026-99",
-    "description": "Order payment for Merchant XYZ",
-    "createdAt": "2026-10-26T10:10:33Z"
-  }
-}
-```
-
----
-
-#### List Transaction Ledger
-Retrieves full chronological ledger of all customer deposits, payments, and refunds.
-- **Method:** `GET`
-- **Path:** `/api/v1/pocket/transactions`
-- **Auth:** Bearer Token
-
-**Request:**
-```bash
-curl -X GET http://localhost:8088/api/v1/pocket/transactions \
-  -H "Authorization: Bearer <TOKEN>"
-```
-
----
-
-#### Refund a Transaction
-Refunds a previously completed payment and credits the exact amount back to the customer's balance.
-- **Method:** `POST`
-- **Path:** `/api/v1/pocket/transactions/{transactionId}/refund`
-- **Auth:** Bearer Token
-
-**Request:**
-```bash
-curl -X POST http://localhost:8088/api/v1/pocket/transactions/6e6fe4ae-782f-403b-931c-0cb4091225b7/refund \
-  -H "Authorization: Bearer <TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reason": "Customer cancelled order before shipping"
-  }'
-```
-
-**Response (`200 OK`):**
-```json
-{
-  "success": true,
-  "message": "Transaction refunded successfully",
-  "data": {
-    "id": "7729dc85-f869-4c20-a723-8e839de37162",
-    "referenceId": "REF-PAY-EBB9326071EA",
-    "type": "REFUND",
-    "amount": 45.50,
-    "balanceAfter": 250.00,
-    "currency": "USD",
-    "status": "SUCCESS",
-    "paymentMethod": "POCKET",
-    "orderId": "ORD-2026-9999",
-    "description": "Refund for PAY-EBB9326071EA (Customer cancelled order before shipping)",
-    "createdAt": "2026-10-26T10:10:33Z"
-  }
-}
-```
-
----
-
-## Error Handling
-
-Errors follow consistent JSON structures with descriptive error codes and HTTP status values:
-
-### Insufficient Balance (`400 Bad Request`)
-```json
-{
-  "success": false,
-  "status": 400,
-  "error": "INSUFFICIENT_BALANCE",
-  "message": "Insufficient pocket balance. Required: USD 5000.00, Available: USD 104.50",
-  "validationErrors": null,
-  "timestamp": "2026-10-26T10:10:33Z"
-}
-```
-
-### Validation Error (`400 Bad Request`)
-```json
-{
-  "success": false,
-  "status": 400,
-  "error": "VALIDATION_ERROR",
-  "message": "Validation failed for request fields",
-  "validationErrors": {
-    "email": "Email must be valid",
-    "password": "Password must be at least 6 characters"
-  },
-  "timestamp": "2026-10-26T10:10:33Z"
-}
-```
-
-### Unauthorized / Token Revoked (`401 Unauthorized`)
-```json
-{
-  "success": false,
-  "status": 401,
-  "error": "UNAUTHORIZED",
-  "message": "Authentication is required to access this resource",
-  "validationErrors": null,
-  "timestamp": "2026-10-26T10:10:33Z"
-}
-```
-
----
-
-## Code Quality & Best Practices
-
-This project adheres to the [`java-springboot` best practices](.agents/skills/java-springboot/SKILL.md):
-- **Domain Modularization:** Code structured by functional domain rather than monolithic layers.
-- **Dependency Inversion:** Explicit constructor injection with immutable `private final` fields.
-- **DTO Isolation:** Database JPA entities are never leaked to API consumers.
-- **Transactional Consistency:** Granular `@Transactional` boundaries on all state mutations.
-- **Optimized Logging:** High-throughput parameterized SLF4J logging across all layers.
